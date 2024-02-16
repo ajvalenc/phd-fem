@@ -2,9 +2,13 @@ from mpi4py import MPI
 from dolfinx import log, fem, mesh
 from dolfinx.fem.petsc import NonlinearProblem
 from dolfinx.nls.petsc import NewtonSolver
-from dolfinx.fem import locate_dofs_topological
+from dolfinx.fem import locate_dofs_topological, locate_dofs_geometrical
 from dolfinx.io import XDMFFile
 from dolfinx.mesh import locate_entities_boundary
+
+import pyvista as pv
+import dolfinx.plot
+
 import numpy as np
 import ufl
 
@@ -20,8 +24,9 @@ V = fem.FunctionSpace(domain, element)
 # Find maximum and minimum values in the z dimension
 max_z = np.max(domain.geometry.x[:, 2])
 min_z = np.min(domain.geometry.x[:, 2])
-tol_bottom = 2e-2
 tol_top = 2e-2
+tol_bottom = 5.9e-4 # 1e-3
+z_threshold = -0.049
 
 # Define Dirichlet boundary
 def bottom(x):
@@ -41,7 +46,14 @@ facet_tag = mesh.meshtags(domain, fdim, marked_facets[sorted_facets], marked_val
 # Define boundary conditions
 u_bc = np.array((0,) * domain.geometry.dim, dtype=np.float64)
 bottom_dofs = locate_dofs_topological(V, facet_tag.dim, facet_tag.find(1))
-bcs = [fem.dirichletbc(u_bc, bottom_dofs, V)]
+#bcs = [fem.dirichletbc(u_bc, bottom_dofs, V)]
+
+def update_bcs():
+    below_threshold_dofs = locate_dofs_geometrical(V, lambda x: x[2] < z_threshold)
+    u_bc_below_threshold = np.array((0, 0, 0), dtype=np.float64)
+    return [fem.dirichletbc(u_bc, bottom_dofs, V), fem.dirichletbc(u_bc_below_threshold, below_threshold_dofs, V)], below_threshold_dofs
+
+bcs, old_dofs = update_bcs()
 
 # Define functions
 v = ufl.TestFunction(V)
@@ -89,13 +101,26 @@ problem = NonlinearProblem(L, u, bcs, J)
 solver = NewtonSolver(domain.comm, problem)
 solver.atol = 1e-6
 solver.rtol = 1e-6
-solver.convergence_criterion = "incremental"
-solver.maximum_iterations = 200
+solver.convergence_criterion = "residual"
+solver.maximum_iterations = 1
 
 log.set_log_level(log.LogLevel.INFO)
 
-num_its, converged = solver.solve(u)
-assert converged
+# Solve the problme until solution has converged and boundary conditions have not changed
+converged = False
+while not converged:
+    num_its, converged = solver.solve(u)
+    if num_its >= solver.maximum_iterations:
+        print("Maximum number of iterations reached without convergence.")
+        break  # Exit the loop if maximum iterations reached without convergence
+
+    new_bcs, new_dofs = update_bcs()
+    print("new dofs", new_dofs)
+    if not np.array_equal(new_dofs, old_dofs):
+        bcs = new_bcs
+        old_dofs = new_dofs
+        solver.set_bounds(bcs)
+        converged = False
 
 # Save solution to file
 with XDMFFile(MPI.COMM_WORLD, "fenicsx/sphere.xdmf", "w") as file:

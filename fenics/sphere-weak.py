@@ -4,37 +4,46 @@ from fenics import *
 parameters["form_compiler"]["optimize"]     = True
 parameters["form_compiler"]["cpp_optimize"] = True
 
+# Load mesh from file
+file = "/home/ajvalenc/Datasets/romado/models/objects/ball.xml"
+mesh = Mesh(file)
+
 # Create mesh and define function space
-#mesh = BoxMesh(Point(0, 0, 0), Point(1, 1, 5), 16, 16, 80)
-mesh = BoxMesh(Point(0, 0, 0), Point(100, 100, 100), 16, 16, 16)
 V = VectorFunctionSpace(mesh, "P", 1) # P = Piecewise linear elements
 
-File("weak/mesh.xml") << mesh
+# Find maximum and minimum values in the z dimension
+max_z = mesh.coordinates()[:, 2].max()
+min_z = mesh.coordinates()[:, 2].min()
+tol = 2e-2
 
-# Mark boundary subdomians
-mf = MeshFunction("size_t", mesh, 2)
-mf.set_all(0)
-class top_boundary(SubDomain):
+# Create subdomains
+class on_top(SubDomain):
     def inside(self, x, on_boundary):
-        return on_boundary and near(x[2], 100)
-right_boundary = top_boundary()
-right_boundary.mark(mf, 1)
-ds = Measure("ds")[mf]
+        return on_boundary and abs(x[2] - max_z) < tol
+class on_bottom(SubDomain):
+    def inside(self, x, on_boundary):
+        return on_boundary and abs(x[2] - min_z) < tol
+
+# Mark boundary subdomains
+mf = MeshFunction("size_t", mesh, 2) # facets in 2d (triangle)
+mf.set_all(0) # Initialize to zero
+top_boundary = on_top()
+bottom_boundary = on_bottom()
+top_boundary.mark(mf, 1)
+bottom_boundary.mark(mf, 2)
+ds = Measure("ds")[mf] # NOTE: masking [mf] may not be necessary as all facets are marked
 
 # Define Dirichlet boundary
-bottom = CompiledSubDomain("near(x[2], value) && on_boundary", value = 0.0)
-c = Expression(("0.0", "0.0", "0.0"), element=V.ufl_element())
-bottom_bcs = DirichletBC(V, c, bottom)
-bcs = [bottom_bcs]
+bc = DirichletBC(V, Constant((0, 0, 0)), mf, 2)
+bcs = [bc]
 
-# Define functions
+# Define variational problem
 du = TrialFunction(V)
 v = TestFunction(V)
-u = Function(V)
-u.interpolate(Constant((0, 0, 0)))
+u = Function(V, name="Displacement")
+#u.interpolate(Constant((0, 0, 0)))
 B = Constant((0.0, 0.0, 0.0))
-#T = Constant((0.0, 0.0, 0.037))
-T = Constant((0.0, 0.0, -0.019)) #-0.018
+T = Constant((0.0, 0.0, -0.018)) #-0.018
 
 # Kinematics
 d = len(u)
@@ -72,5 +81,5 @@ solve(L==0, u, bcs, J=J,
                                           #"preconditioner":"ilu",
                                           "convergence_criterion":"incremental",}})
 #File("medium/u0.pvd", "compressed") << u
-file = File("fenics/weak/u.pvd") 
+file = File("weak/u.pvd") 
 file << u
